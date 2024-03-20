@@ -703,12 +703,22 @@ def main():
         # See more about loading custom images at
         # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
 
+
+    # Add the dummy caption
+    def add_caption(example):
+        example["text"] = ["singing"]
+        return example
+
+    dataset = dataset.map(add_caption, batched=False)
+
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
     column_names = dataset["train"].column_names
 
     # 6. Get the column names for input/target.
-    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    # dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    dataset_columns = ["image", "text"]
+
     if args.image_column is None:
         image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
@@ -725,6 +735,7 @@ def main():
             raise ValueError(
                 f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
             )
+
 
     # Preprocessing the datasets.
     # We need to tokenize input captions and transform the images.
@@ -749,7 +760,7 @@ def main():
     train_transforms = transforms.Compose(
         [
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+            # transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
@@ -953,6 +964,13 @@ def main():
 
                 # Backpropagate
                 accelerator.backward(loss)
+                # Calculate the average gradient norm
+                total_norm = 0.0
+                for p in unet.parameters():
+                    if p.grad is not None:  # Ensure parameter has gradients
+                        param_norm = p.grad.data.norm(2)  # L2 norm of the gradient
+                        total_norm += param_norm.item() ** 2
+                total_norm = (total_norm ** 0.5) / len(list(unet.parameters()))  # Calculate average norm
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
                 optimizer.step()
@@ -965,7 +983,7 @@ def main():
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
+                accelerator.log({"train_loss": train_loss, "grad_norm": total_norm}, step=global_step)
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
@@ -1057,7 +1075,8 @@ def main():
                 with torch.autocast("cuda"):
                     image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
                 images.append(image)
-
+                image.save(os.path.join(args.output_dir, f"epoch{epoch}_image{i}.png"))
+        print("Done here")
         if args.push_to_hub:
             save_model_card(args, repo_id, images, repo_folder=args.output_dir)
             upload_folder(
@@ -1066,6 +1085,8 @@ def main():
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )
+    print("Ok...")
+
 
     accelerator.end_training()
 

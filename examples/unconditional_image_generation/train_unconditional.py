@@ -21,11 +21,14 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 
 import diffusers
-from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
+# from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
+from diffusers import DDIMPipeline, DDIMScheduler, UNet2DModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, is_accelerate_version, is_tensorboard_available, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
+
+from PIL import Image
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -321,7 +324,10 @@ def main(args):
 
                 # load diffusers style into model
                 load_model = UNet2DModel.from_pretrained(input_dir, subfolder="unet")
-                model.register_to_config(**load_model.config)
+                config_dict = dict(load_model.config)
+                config_dict['sample_size'] = args.resolution
+
+                model.register_to_config(**config_dict)
 
                 model.load_state_dict(load_model.state_dict())
                 del load_model
@@ -355,10 +361,13 @@ def main(args):
 
     # Initialize the model
     if args.model_config_name_or_path is None:
+        print("Here 360")
         model = UNet2DModel(
             sample_size=args.resolution,
             in_channels=3,
             out_channels=3,
+            # in_channels=1,
+            # out_channels=1,
             layers_per_block=2,
             block_out_channels=(128, 128, 256, 256, 512, 512),
             down_block_types=(
@@ -379,8 +388,13 @@ def main(args):
             ),
         )
     else:
+        print("Here 387")
         config = UNet2DModel.load_config(args.model_config_name_or_path)
         model = UNet2DModel.from_config(config)
+
+    # print(model)
+    # import pdb
+    # pdb.set_trace()
 
     # Create EMA for the model.
     if args.use_ema:
@@ -416,15 +430,15 @@ def main(args):
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     # Initialize the scheduler
-    accepts_prediction_type = "prediction_type" in set(inspect.signature(DDPMScheduler.__init__).parameters.keys())
+    accepts_prediction_type = "prediction_type" in set(inspect.signature(DDIMScheduler.__init__).parameters.keys())
     if accepts_prediction_type:
-        noise_scheduler = DDPMScheduler(
+        noise_scheduler = DDIMScheduler(
             num_train_timesteps=args.ddpm_num_steps,
             beta_schedule=args.ddpm_beta_schedule,
             prediction_type=args.prediction_type,
         )
     else:
-        noise_scheduler = DDPMScheduler(num_train_timesteps=args.ddpm_num_steps, beta_schedule=args.ddpm_beta_schedule)
+        noise_scheduler = DDIMScheduler(num_train_timesteps=args.ddpm_num_steps, beta_schedule=args.ddpm_beta_schedule)
 
     # Initialize the optimizer
     optimizer = torch.optim.AdamW(
@@ -456,7 +470,7 @@ def main(args):
     augmentations = transforms.Compose(
         [
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+            # transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
             transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
@@ -464,6 +478,7 @@ def main(args):
     )
 
     def transform_images(examples):
+        # images = [augmentations(image.convert("L")) for image in examples["image"]]
         images = [augmentations(image.convert("RGB")) for image in examples["image"]]
         return {"input": images}
 
@@ -510,17 +525,18 @@ def main(args):
 
     global_step = 0
     first_epoch = 0
+    resume_step = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+        # if args.resume_from_checkpoint != "latest":
+        #     path = os.path.basename(args.resume_from_checkpoint)
+        # else:
+        # Get the most recent checkpoint
+        dirs = os.listdir(args.resume_from_checkpoint)
+        dirs = [d for d in dirs if d.startswith("checkpoint")]
+        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+        path = dirs[-1] if len(dirs) > 0 else None
 
         if path is None:
             accelerator.print(
@@ -529,14 +545,17 @@ def main(args):
             args.resume_from_checkpoint = None
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
-            global_step = int(path.split("-")[1])
+            accelerator.load_state(os.path.join(args.resume_from_checkpoint, path))
+            print("Done resuming")
+            # global_step = int(path.split("-")[1])
 
-            resume_global_step = global_step * args.gradient_accumulation_steps
-            first_epoch = global_step // num_update_steps_per_epoch
-            resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
+            # resume_global_step = global_step * args.gradient_accumulation_steps
+
+            # first_epoch = global_step // num_update_steps_per_epoch
+            # resume_step = resume_global_step % (num_update_steps_per_epoch * args.gradient_accumulation_steps)
 
     # Train!
+    print(f"{first_epoch} {args.num_epochs}")
     for epoch in range(first_epoch, args.num_epochs):
         model.train()
         progress_bar = tqdm(total=num_update_steps_per_epoch, disable=not accelerator.is_local_main_process)
@@ -637,7 +656,7 @@ def main(args):
                     ema_model.store(unet.parameters())
                     ema_model.copy_to(unet.parameters())
 
-                pipeline = DDPMPipeline(
+                pipeline = DDIMPipeline(
                     unet=unet,
                     scheduler=noise_scheduler,
                 )
@@ -656,6 +675,10 @@ def main(args):
 
                 # denormalize the images and save to tensorboard
                 images_processed = (images * 255).round().astype("uint8")
+                image = images_processed[0]
+                # image = Image.fromarray(image[:, :, 0], 'L')
+                image = Image.fromarray(image, 'RGB')
+                image.save(f'{args.output_dir}/output_image{epoch}.png')
 
                 if args.logger == "tensorboard":
                     if is_accelerate_version(">=", "0.17.0.dev0"):
@@ -678,7 +701,7 @@ def main(args):
                     ema_model.store(unet.parameters())
                     ema_model.copy_to(unet.parameters())
 
-                pipeline = DDPMPipeline(
+                pipeline = DDIMPipeline(
                     unet=unet,
                     scheduler=noise_scheduler,
                 )

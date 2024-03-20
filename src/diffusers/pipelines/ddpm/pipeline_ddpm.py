@@ -16,6 +16,8 @@
 from typing import List, Optional, Tuple, Union
 
 import torch
+import numpy as np
+from PIL import Image
 
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
@@ -106,15 +108,42 @@ class DDPMPipeline(DiffusionPipeline):
         else:
             image = randn_tensor(image_shape, generator=generator, device=self.device)
 
+        # Loading up some bad singing
+        start_step = 400
+        orig_image = Image.open("/gscratch/realitylab/vjayaram/vocal_diffusion/bad_singing/image_1.png")
+        orig_image = np.array(orig_image.resize((256, 256)))
+        orig_image = orig_image / 127.5 - 1.0 # Convert to (-1, 1)
+        orig_image = torch.from_numpy(orig_image).unsqueeze(0).permute(0, 3, 1, 2)
+
+        # See equation 4 in DDPM paper
+        # a_t = self.scheduler.alphas_cumprod[start_step]
+        # orig_image = orig_image * (a_t ** 0.5) + ((1 - a_t) ** 0.5) * randn_tensor(image_shape, generator=generator)        
+        # orig_image = orig_image.to(self.device).to(torch.float)
+        # image = orig_image
+
         # set step values
         self.scheduler.set_timesteps(num_inference_steps)
 
+        # for t in self.progress_bar(self.scheduler.timesteps[-(start_step + 1):]):
         for t in self.progress_bar(self.scheduler.timesteps):
-            # 1. predict noise model_output
+            a_t = self.scheduler.alphas_cumprod[t]
+            noised_image = orig_image * (a_t ** 0.5) + ((1 - a_t) ** 0.5) * randn_tensor(image_shape, generator=generator)        
+            noised_image = noised_image.to(self.device).to(torch.float)
+            if (t > 250):
+                image[0, :, :100] = noised_image[0, :, :100]
+
+            # 1. predict noise model_outputh 
             model_output = self.unet(image, t).sample
 
             # 2. compute previous image: x_t -> x_t-1
             image = self.scheduler.step(model_output, t, image, generator=generator).prev_sample
+            if (t % 50 == 0):
+                output_image = (image / 2 + 0.5).clamp(0, 1).cpu().permute(0, 2, 3, 1).numpy()
+                output_pil = self.numpy_to_pil(output_image)[0]
+                output_pil.save(f"/gscratch/realitylab/vjayaram/vocal_diffusion/bad_singing/diffusion_step{t}.png")
+                print(image.std())
+                print(image.min())
+                print(image.max())
 
         image = (image / 2 + 0.5).clamp(0, 1)
         image = image.cpu().permute(0, 2, 3, 1).numpy()
