@@ -19,6 +19,8 @@ import torch
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
 
+from sinkhorn import sinkhorn
+
 from ...configuration_utils import FrozenDict
 from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...loaders import FromSingleFileMixin, IPAdapterMixin, LoraLoaderMixin, TextualInversionLoaderMixin
@@ -37,6 +39,8 @@ from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionPipelineOutput
 from .safety_checker import StableDiffusionSafetyChecker
+import torch.nn.functional as F
+
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -54,6 +58,58 @@ EXAMPLE_DOC_STRING = """
         >>> image = pipe(prompt).images[0]
         ```
 """
+
+
+def image_to_point_cloud_grayscale(img_tensor):
+    """
+    Convert a grayscale image to a point cloud representation including spatial dimensions and intensity.
+    
+    Args:
+    img_tensor (torch.Tensor): Input tensor of shape [1, H, W] for a single grayscale image.
+    
+    Returns:
+    torch.Tensor: A tensor of shape [H*W, 3] representing the point cloud, where each row contains
+                  the (x, y) coordinates and intensity of a pixel.
+    """
+    C, H, W = img_tensor.size()
+    assert C == 1, "Input tensor should be a single-channel grayscale image."
+    
+    # Create a meshgrid for the spatial coordinates
+    x_coord, y_coord = torch.meshgrid(torch.linspace(0, 1, steps=W), torch.linspace(0, 1, steps=H))
+    # Flatten the spatial dimensions
+    spatial_coords = torch.stack((x_coord.flatten(), y_coord.flatten()), dim=1)
+    # Flatten the image and add as another dimension
+    intensities = img_tensor.flatten().unsqueeze(1)
+    # Concatenate spatial coordinates with intensities
+    point_cloud = torch.cat((spatial_coords.to("cuda"), intensities), dim=1)
+    
+    return point_cloud
+
+
+def image_to_point_cloud_rgb(img_tensor):
+    """
+    Convert an RGB image to a point cloud representation including spatial dimensions and color intensities.
+    
+    Args:
+    img_tensor (torch.Tensor): Input tensor of shape [3, H, W] for a single RGB image.
+    
+    Returns:
+    torch.Tensor: A tensor of shape [H*W, 5] representing the point cloud, where each row contains
+                  the (x, y) coordinates and RGB intensities of a pixel.
+    """
+    C, H, W = img_tensor.size()
+    assert C == 3, "Input tensor should be a three-channel RGB image."
+    
+    # Create a meshgrid for the spatial coordinates
+    x_coord, y_coord = torch.meshgrid(torch.linspace(0, 1, steps=W), torch.linspace(0, 1, steps=H))
+    # Flatten the spatial dimensions
+    spatial_coords = torch.stack((x_coord.flatten(), y_coord.flatten()), dim=1)
+    # Flatten the image channels and concatenate them
+    rgb_intensities = img_tensor.permute(1, 2, 0).reshape(-1, 3)
+    # Concatenate spatial coordinates with RGB intensities
+    point_cloud = torch.cat((spatial_coords.to("cuda"), rgb_intensities), dim=1)
+    
+    return point_cloud
 
 
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
@@ -909,8 +965,8 @@ class StableDiffusionPipeline(
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                if i < 20: continue
-                # expand the latents if we are doing classifier free guidance
+                if i < 25: continue
+                # expandthe latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -936,9 +992,56 @@ class StableDiffusionPipeline(
 
                 # import pdb
                 # pdb.set_trace()
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                
 
+                # compute the previous noisy sample x_t -> x_t-1
+                
+                # Diffusion step
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                
+                # a_t
+                # alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                # beta_prod_t = 1 - alpha_prod_t
+
+                # # L2 loss in pixel space
+                with torch.enable_grad():
+
+                    latents.requires_grad_(True)
+                    x_hat_0 =  (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                    
+                    image = self.vae.decode(x_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                    
+                    # p1 = image_to_point_cloud_grayscale(kwargs["constrain_output"].mean(dim=1, keepdim=True)[0]).to("cuda")
+                    # p2 = image_to_point_cloud_grayscale(image.mean(dim=1, keepdim=True)[0]).to("cuda")
+
+                    # loss, corrs_1_to_2, corrs_2_to_1 = sinkhorn(p1, p2)
+
+                    # loss = ((p1 - p2[corrs_1_to_2]) ** 2.0).sum(-1).mean() + \
+                    #         ((p2 - p1[corrs_2_to_1]) ** 2.0).sum(-1).mean()
+
+                    # image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                    loss = F.mse_loss(image, kwargs["constrain_output"])
+                    print(loss)
+                    loss.backward()
+                    step_size = 1 / (loss.item() ** 0.5)
+                    print(step_size)
+                    print("-------")
+                    # latents = latents - 100 * latents.grad
+
+                    if (i < 50):
+                        with torch.no_grad():  # Temporarily disable gradient tracking
+                            latents = tmp - 35 * step_size * latents.grad
+
+                    else:
+                        latents = tmp
+                    latents.requires_grad_(False)
+                #     # latents = latents.detach()
+
+                #     output_image = self.image_processor.postprocess(image.detach(), output_type="pil")[0]
+                #     output_image.save(f"intermediate_output_{i}.png")
+
+
+                # print(torch.norm(latents - kwargs["constrain_latents"]))
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
@@ -957,10 +1060,9 @@ class StableDiffusionPipeline(
                         callback(step_idx, t, latents)
 
         if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            has_nsfw_concept = None
         else:
             image = latents
             has_nsfw_concept = None
