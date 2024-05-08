@@ -216,6 +216,7 @@ class Decoder(nn.Module):
         act_fn: str = "silu",
         norm_type: str = "group",  # group, spatial
         mid_block_add_attention=True,
+        actual_temb_channels=None
     ):
         super().__init__()
         self.layers_per_block = layers_per_block
@@ -232,6 +233,9 @@ class Decoder(nn.Module):
         self.up_blocks = nn.ModuleList([])
 
         temb_channels = in_channels if norm_type == "spatial" else None
+        if actual_temb_channels is not None:
+            temb_channels = actual_temb_channels
+        print(f"Temb channels {temb_channels}")
 
         # mid
         self.mid_block = UNetMidBlock2D(
@@ -267,7 +271,7 @@ class Decoder(nn.Module):
                 resnet_groups=norm_num_groups,
                 attention_head_dim=output_channel,
                 temb_channels=temb_channels,
-                resnet_time_scale_shift=norm_type,
+                resnet_time_scale_shift="default",
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel
@@ -338,10 +342,10 @@ class Decoder(nn.Module):
                 sample = up_block(sample, latent_embeds)
 
         # post-process
-        if latent_embeds is None:
-            sample = self.conv_norm_out(sample)
-        else:
-            sample = self.conv_norm_out(sample, latent_embeds)
+        # if latent_embeds is None:
+        sample = self.conv_norm_out(sample)
+        # else:
+        #     sample = self.conv_norm_out(sample, latent_embeds)
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
 
@@ -478,7 +482,6 @@ class MaskConditionDecoder(nn.Module):
         self.up_blocks = nn.ModuleList([])
 
         temb_channels = in_channels if norm_type == "spatial" else None
-
         # mid
         self.mid_block = UNetMidBlock2D(
             in_channels=block_out_channels[-1],
