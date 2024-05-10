@@ -14,8 +14,11 @@
 
 import inspect
 from typing import Any, Callable, Dict, List, Optional, Union
+import os
 
 import torch
+import torch.nn.functional as F
+from torchvision.transforms import ToPILImage
 from packaging import version
 from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
 
@@ -55,6 +58,17 @@ EXAMPLE_DOC_STRING = """
         ```
 """
 
+
+def save_to_image(tensor, filename):
+    to_save = (tensor + 1) / 2
+    to_save = to_save.clamp(0, 1)
+
+    # Convert to PIL Image
+    transform = ToPILImage()
+    img = transform(to_save)
+
+    # Save the image
+    img.save(filename)
 
 def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
     """
@@ -960,14 +974,67 @@ class StableDiffusionPipeline(
         # 7. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
+        ts = []
+        mus = []
+        mus_original = []
+        logvars = []
+        latents_grads = []
+        mses = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                # print(f"{i} {t}")
+                # continue
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                alpha_prod_t_prev = self.scheduler.alphas_cumprod[t-1] if t-1 >= 0 else self.scheduler.one
+                beta_prod_t = 1 - alpha_prod_t
+                beta_prod_t_prev = 1 - alpha_prod_t_prev
+                current_alpha_t = alpha_prod_t / alpha_prod_t_prev
+                current_beta_t = 1 - current_alpha_t
                 if self.interrupt:
                     continue
+
+                # For checking how much the training noised up latent diverges
+                # print(f"t {t}")
+                # print(f"Beta cumprod {1 - self.scheduler.alphas_cumprod[t]}")
+                # noise = torch.randn_like(latents)
+                # noisy_latents = self.scheduler.add_noise(latents, noise, t)
+                # t_emb = kwargs["time_proj"](t.unsqueeze(0))
+                # emb = kwargs["time_embedding"](t_emb)
+                # output = kwargs["likelihood_model"](noisy_latents, emb)
+                # print(f"mu {torch.abs((kwargs['original_image'] - output[:, 0:3])).mean()}")
+                # print(f"logvar {output[:, 3:].mean()}")
+                # mu = output[:, 0:3, :, :]  # Mean
+                # logvar = output[:, 3:6, :, :]  # Log variance
+                # sigma_squared = torch.exp(logvar)
+                # sigma_squared = torch.clamp(sigma_squared, min=1e-7)
+                # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * sigma_squared[:, :, ::3, ::3]) + ((kwargs["original_image"][:, :, ::3, ::3] - mu[:, :, ::3, ::3]) ** 2) / (sigma_squared[:, :, ::3, ::3]))
+                # nll = torch.mean(nll_per_pixel)
+                # print(f"nll {nll}")
+                # print("------")
+
+                # logvars.append(nll)
+                # # mus.append(torch.abs((kwargs['original_image'] - output[:, 0:3])).mean())
+                # # logvars.append(output[:, 3:].mean())
+                # ts.append(1000 - t)
+                # # with torch.no_grad():
+                # #     curr_output = self.vae.decode(noisy_latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                # #     save_to_image(curr_output[0], os.path.join("intermediate_outputs", f"{i}.png"))
+                # #     print(f"mu original {torch.abs((kwargs['original_image'] - curr_output)).mean()}")
+                # #     mus_original.append(torch.abs((kwargs['original_image'] - curr_output)).mean())
+                # continue
+
+
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                beta_prod_t = 1 - alpha_prod_t
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+
+                a_t = self.scheduler.alphas_cumprod[t - 1]
+                curr_var = (1 - a_t)
+                curr_sigma = curr_var ** 0.5
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -989,8 +1056,136 @@ class StableDiffusionPipeline(
                     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
                     noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
-                # compute the previous noisy sample x_t -> x_t-1
+                # Print out the 0 estimate
+                # x_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                # image = self.vae.decode(x_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                # save_to_image(image[0], os.path.join("intermediate_outputs", f"z_0_{i}.png"))
+
+                # UNCOMMENT HERE
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                continue
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                alpha_prod_t_prev = self.scheduler.alphas_cumprod[t - 1] if t - 1 >= 0 else 1
+                current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
+                overall_eta = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
+                with torch.enable_grad():
+                    # compute the previous noisy sample x_t -> x_t-1
+
+                    # Complete decoder
+                    # latents = torch.clamp(latents, min=-2, max=2)
+                    latents = latents.clone().detach().requires_grad_(True)
+                    with torch.no_grad():
+                        curr_output = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                        print(f"max image {abs(curr_output).max()}")
+                        save_to_image(curr_output[0], os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}.png"))
+                        mses.append(F.mse_loss(curr_output[:, :, :, :256], kwargs["original_image"][:, :, :, 0:256], reduction="mean"))
+                        # print(f"mse loss {mses[-1]}")
+                    
+
+                    # if latents.grad is not None:
+                    #     latents.grad.zero_()
+
+                    # curr_output = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                    # with torch.no_grad():
+                    #     save_to_image(curr_output[0], os.path.join("intermediate_outputs", f"{i}.png"))
+
+                    # eta = 0.00003
+
+
+                    # x_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                    # curr_output = self.vae.decode(x_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+
+                    # loss = F.mse_loss(curr_output[:, :, :, 0:220], kwargs["original_image"][:, :, :, 0:220])
+                    # print(loss)
+                    # loss.backward()
+                    # with torch.no_grad():
+                    #     latents -= eta * latents.grad
+
+
+                    """
+                    Simple DPS
+                    """
+                    # eta = 0.00006
+                    for _ in range(1):
+                        if latents.grad is not None:
+                            latents.grad.zero_()
+                        z_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                        x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                        
+
+                        # loss = F.mse_loss(x_hat_0[:, :, ::3, ::3], kwargs["original_image"][:, :, ::3, ::3], reduction="sum")
+                        # print(loss)
+                        # print(t)
+                        # # # loss.backward()
+                        with torch.no_grad():
+                            save_to_image(x_hat_0[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_z_0.png"))
+                        # #     latents -= eta * latents.grad
+
+                        """
+                        rout simple correction
+                        """
+                        # encoded = self.vae.encode(x_hat_0)
+                        # latent_encoded = encoded.latent_dist.sample()
+                        # latent_encoded *= self.vae.config.scaling_factor
+                        # loss_rout = F.mse_loss(z_hat_0, latent_encoded, reduction="mean")
+                        # print(f"Loss route {loss_rout}")
+                        # # final_loss = loss + loss_rout
+                        # # final_loss.backward()
+                        # # with torch.no_grad():
+                        # #     latents -= eta * latents.grad
+
+
+                        """
+                        Ours
+                        """
+                        print(f"Latents max {abs(latents).max()}")
+                        with torch.no_grad():
+                            eta = 12 # / 0.012 * overall_eta
+                            # eta = 5000 * overall_eta
+                        #     # eta = 2 / (((kwargs["original_image"][:, :, ::8, ::8] - x_hat_0[:, :, ::8, ::8]) ** 2).mean() ** 0.5)
+                            print(f"eta {eta}")
+
+                        # # if latents.grad is not None:
+                        # #     latents.grad.zero_()
+                        t_emb = kwargs["time_proj"](t.unsqueeze(0))
+                        emb = kwargs["time_embedding"](t_emb)
+                        output = kwargs["likelihood_model"](latents, emb)
+
+                        mu = output[:, 0:3, :, :]  # Mean
+                        save_to_image(mu[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_p(y|z).png"))
+                        logvar = output[:, 3:6, :, :]
+                        save_to_image(logvar[0].detach().cpu() / 4 + 1, os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_sigma_p(y|z).png"))
+                        logvar = logvar.mean()
+                        sigma_squared = torch.exp(logvar)
+                        curr_sigma_squared = sigma_squared
+                        print(f"Curr sigma squared {curr_sigma_squared}")
+                        # sigma_squared = torch.clamp(sigma_squared, min=1e-7)
+                        # with torch.no_grad():
+                        #     curr_sigma_squared = 50 * ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2).mean()
+                        #     print(f"Predicted sigma squared {sigma_squared.mean()} curr_sigma_squared {curr_sigma_squared}")
+                        #     curr_sigma_squared = sigma_squared.mean()
+                        #     eta = 5 # 300 * curr_sigma_squared
+                        #     # eta = 2 / (((kwargs["original_image"][:, :, ::8, ::8] - x_hat_0[:, :, ::8, ::8]) ** 2).mean() ** 0.5)
+                        #     print(f"eta {eta}")
+                        #     print(f"sigma squared {curr_sigma_squared}")
+                        # sigma_squared = torch.FloatTensor([1.0]).to("cuda") # curr_var
+                        # log_p_z = latents_new - latents
+                        # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * sigma_squared[:, :, ::8, ::8]) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (sigma_squared[:, :, ::8, ::8]))
+                        nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (curr_sigma_squared))
+                        # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::, ::] - mu[:, :, ::, ::]) ** 2) / (curr_sigma_squared))
+
+                        nll = torch.mean(nll_per_pixel)
+                        (nll).backward()
+                        print(f"Log prob {nll}")
+                        logvars.append(nll)
+                        print(f"Curr sigma {curr_sigma}")
+                        print(f"{i}")
+                        # Update latents
+                        # if i < 818:
+                        with torch.no_grad():
+                            latents_grads.append((latents.grad ** 2).sum() ** 0.5)
+                            print(f"Latents grad {latents_grads[-1]}")
+                            latents -= eta * latents.grad
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -1009,6 +1204,8 @@ class StableDiffusionPipeline(
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
 
+        import pdb
+        pdb.set_trace()
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
                 0

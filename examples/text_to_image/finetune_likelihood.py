@@ -45,14 +45,14 @@ DATASET_NAME_MAPPING = {
 }
 
 
-PRETRAINED_DECODER_PATH = "/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/ffhq-likelihood/vae_trainable_may7.pth"
-PRETRAINED_EMBEDDING_PATH = "/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/ffhq-likelihood/time_embeddings_may7.pth"
+PRETRAINED_DECODER_PATH = "/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/ffhq-likelihood/vae_trainable_may9.pth"
+PRETRAINED_EMBEDDING_PATH = "/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/ffhq-likelihood/time_embeddings_may9.pth"
 
 def gaussian_nll_loss(input, target):
     # Assume input is the prediction with shape [batch, 6, height, width]
     # where input[:, :3, :, :] are the means (mu) and input[:, 3:, :, :] are log(sigma^2) (logvar)
     mu = input[:, :3, :, :]
-    logvar = input[:, 3:, :, :]
+    logvar = input[:, 3:, :, :].mean()
     sigma_squared = torch.exp(logvar)  # Convert log(sigma^2) to sigma^2
 
     # Compute Gaussian NLL
@@ -105,9 +105,9 @@ def main():
     #     args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
     # )
 
-    text_encoder = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
+    # text_encoder = CLIPTextModel.from_pretrained(
+    #     args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+    # )
 
 
     vae_fixed = AutoencoderKL.from_pretrained(
@@ -158,7 +158,7 @@ def main():
 
     # Freeze vae and text_encoder and set vae_trainable to trainable
     vae_fixed.requires_grad_(False)
-    text_encoder.requires_grad_(False)
+    # text_encoder.requires_grad_(False)
     # unet.requires_grad_(False)
     vae_trainable.train()
     time_embedding.train()
@@ -339,7 +339,7 @@ def main():
 
 
     # Move text_encode and vae to gpu and cast to weight_dtype
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
+    # text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae_fixed.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -475,8 +475,8 @@ def main():
 
             if global_step % 100 == 0:  # Every N steps
                 if accelerator.is_main_process:
-                    torch.save(vae_trainable.state_dict(), os.path.join(args.output_dir, f"vae_trainable_may8.pth"))
-                    torch.save(time_embedding.state_dict(), os.path.join(args.output_dir, f"time_embeddings_may8.pth"))
+                    torch.save(vae_trainable.state_dict(), os.path.join(args.output_dir, f"vae_trainable_may9_2.pth"))
+                    torch.save(time_embedding.state_dict(), os.path.join(args.output_dir, f"time_embeddings_may9_2.pth"))
                 accelerator.wait_for_everyone()  # Ensure all processes wait until the main process has saved the model
 
         logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
