@@ -979,6 +979,7 @@ class StableDiffusionPipeline(
         mus_original = []
         logvars = []
         latents_grads = []
+        noise_preds_grads = []
         mses = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -988,6 +989,20 @@ class StableDiffusionPipeline(
                 alpha_prod_t_prev = self.scheduler.alphas_cumprod[t-1] if t-1 >= 0 else self.scheduler.one
                 beta_prod_t = 1 - alpha_prod_t
                 beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+                sample_coeff = (alpha_prod_t_prev / alpha_prod_t) ** (0.5)
+                # corresponds to denominator of e_θ(x_t, t) in formula (9)
+
+                model_output_denom_coeff = alpha_prod_t * beta_prod_t_prev ** (0.5) + (
+                    alpha_prod_t * beta_prod_t * alpha_prod_t_prev
+                ) ** (0.5)
+
+                # print(f"Sample Coeff {sample_coeff}")
+                # print(f"model coeff {(alpha_prod_t_prev - alpha_prod_t) / model_output_denom_coeff}")
+                ratio = sample_coeff /((alpha_prod_t_prev - alpha_prod_t) / model_output_denom_coeff)
+                print(f"ratio {ratio}")
+
+
                 current_alpha_t = alpha_prod_t / alpha_prod_t_prev
                 current_beta_t = 1 - current_alpha_t
                 if self.interrupt:
@@ -1027,43 +1042,32 @@ class StableDiffusionPipeline(
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 beta_prod_t = 1 - alpha_prod_t
 
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
+                # # expand the latents if we are doing classifier free guidance
+                # latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                # latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 a_t = self.scheduler.alphas_cumprod[t - 1]
                 curr_var = (1 - a_t)
                 curr_sigma = curr_var ** 0.5
 
-                # predict the noise residual
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
-
                 # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                # if self.do_classifier_free_guidance:
+                #     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                #     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                # if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                #     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                #     noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
                 # Print out the 0 estimate
                 # x_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
                 # image = self.vae.decode(x_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
                 # save_to_image(image[0], os.path.join("intermediate_outputs", f"z_0_{i}.png"))
 
+                latents_original = latents.clone().detach()
+                latents_grad = None
+
                 # UNCOMMENT HERE
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                continue
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 alpha_prod_t_prev = self.scheduler.alphas_cumprod[t - 1] if t - 1 >= 0 else 1
                 current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
@@ -1109,16 +1113,16 @@ class StableDiffusionPipeline(
                     for _ in range(1):
                         if latents.grad is not None:
                             latents.grad.zero_()
-                        z_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
-                        x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                        # z_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                        # x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
                         
 
                         # loss = F.mse_loss(x_hat_0[:, :, ::3, ::3], kwargs["original_image"][:, :, ::3, ::3], reduction="sum")
                         # print(loss)
                         # print(t)
                         # # # loss.backward()
-                        with torch.no_grad():
-                            save_to_image(x_hat_0[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_z_0.png"))
+                        # with torch.no_grad():
+                        #     save_to_image(x_hat_0[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_z_0.png"))
                         # #     latents -= eta * latents.grad
 
                         """
@@ -1141,6 +1145,7 @@ class StableDiffusionPipeline(
                         print(f"Latents max {abs(latents).max()}")
                         with torch.no_grad():
                             eta = 12 # / 0.012 * overall_eta
+                            eta = 0.000001
                             # eta = 5000 * overall_eta
                         #     # eta = 2 / (((kwargs["original_image"][:, :, ::8, ::8] - x_hat_0[:, :, ::8, ::8]) ** 2).mean() ** 0.5)
                             print(f"eta {eta}")
@@ -1157,10 +1162,13 @@ class StableDiffusionPipeline(
                         save_to_image(logvar[0].detach().cpu() / 4 + 1, os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_sigma_p(y|z).png"))
                         logvar = logvar.mean()
                         sigma_squared = torch.exp(logvar)
+                        # curr_sigma_squared = sigma_squared.clone().detach()
+                        # curr_sigma_squared.requires_grad_(False)
                         curr_sigma_squared = sigma_squared
-                        print(f"Curr sigma squared {curr_sigma_squared}")
+                        # print(f"Curr sigma squared {curr_sigma_squared}")
                         # sigma_squared = torch.clamp(sigma_squared, min=1e-7)
                         # with torch.no_grad():
+                        #     curr_sigma_squared = sigma_squared
                         #     curr_sigma_squared = 50 * ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2).mean()
                         #     print(f"Predicted sigma squared {sigma_squared.mean()} curr_sigma_squared {curr_sigma_squared}")
                         #     curr_sigma_squared = sigma_squared.mean()
@@ -1171,10 +1179,10 @@ class StableDiffusionPipeline(
                         # sigma_squared = torch.FloatTensor([1.0]).to("cuda") # curr_var
                         # log_p_z = latents_new - latents
                         # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * sigma_squared[:, :, ::8, ::8]) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (sigma_squared[:, :, ::8, ::8]))
-                        nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (curr_sigma_squared))
+                        nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, :256, ::] - mu[:, :, :256, ::]) ** 2) / (curr_sigma_squared))
                         # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::, ::] - mu[:, :, ::, ::]) ** 2) / (curr_sigma_squared))
 
-                        nll = torch.mean(nll_per_pixel)
+                        nll = torch.sum(nll_per_pixel)
                         (nll).backward()
                         print(f"Log prob {nll}")
                         logvars.append(nll)
@@ -1182,10 +1190,67 @@ class StableDiffusionPipeline(
                         print(f"{i}")
                         # Update latents
                         # if i < 818:
+                        latents_grad = latents.grad.clone().detach()
                         with torch.no_grad():
                             latents_grads.append((latents.grad ** 2).sum() ** 0.5)
                             print(f"Latents grad {latents_grads[-1]}")
                             latents -= eta * latents.grad
+
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents_original] * 2) if self.do_classifier_free_guidance else latents_original
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+
+                # a_t = self.scheduler.alphas_cumprod[t - 1]
+                # curr_var = (1 - a_t)
+                # curr_sigma = curr_var ** 0.5
+
+                # predict the noise residual
+                noise_pred = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep_cond=timestep_cond,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+
+                noise_pred_magnitude = (noise_pred ** 2).sum() ** 0.5
+                # actual_noise_pred = noise_pred + (latents_original - latents) * 0.5 * noise_pred_magnitude / grad_step_magnitude
+
+                # print(f"Scaling amount {noise_pred_magnitude / grad_step_magnitude}")
+                # actual_noise_pred = noise_pred + (latents_original - latents) * ratio
+                step_magnitude = ((latents_original - latents) ** 2).sum() ** 0.5
+                z_hat_0 = (latents_original - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+                # modified_noise_pred = noise_pred + (latents_original - latents) * noise_pred_magnitude / step_magnitude
+                import pdb
+                pdb.set_trace()
+                modified_noise_pred = ((noise_pred / curr_var) - latents_grad) * curr_var
+
+                # modified_noise_pred = modified_noise_pred / ((modified_noise_pred ** 2).sum() ** 0.5) * noise_pred_magnitude
+                x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                with torch.no_grad():
+                    save_to_image(x_hat_0[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq_2", f"{i}_z_0.png"))
+
+                print(f"noise pred magnitude {(noise_pred ** 2).sum() ** 0.5}")
+                noise_preds_grads.append((noise_pred ** 2).sum() ** 0.5)
+                
+                latents = self.scheduler.step(modified_noise_pred, t, latents_original, **extra_step_kwargs, return_dict=False)[0]
+
+                # grad_step_magnitude = ((latents_original - latents) ** 2).sum() ** 0.5
+
+                # self.scheduler.ets[-1] = (latents_original - latents) * noise_pred_magnitude / grad_step_magnitude
+                # self.scheduler.ets[-1] = modified_noise_pred 
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
