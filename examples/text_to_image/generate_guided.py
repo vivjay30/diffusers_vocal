@@ -1,4 +1,4 @@
-from diffusers import StableDiffusionPipeline, DDPMScheduler
+from diffusers import StableDiffusionPipeline, DDPMScheduler, DDIMScheduler
 import torch
 import os
 import numpy as np
@@ -17,7 +17,14 @@ ddpm_scheduler = DDPMScheduler(
     beta_end=0.012,
     beta_schedule="scaled_linear",
     prediction_type="epsilon")
-# pipe.scheduler = ddpm_scheduler
+# ddpm_scheduler = DDIMScheduler(
+#     num_train_timesteps=1000,
+#     beta_start=0.00085,
+#     beta_end=0.012,
+#     beta_schedule="scaled_linear",
+#     prediction_type="epsilon")
+# ddpm_scheduler.set_timesteps(1000)
+pipe.scheduler_alternate = ddpm_scheduler
 
 pipe.safety_checker = None
 pipe = pipe.to("cuda")
@@ -51,7 +58,7 @@ likelihood_model = Decoder(
     actual_temb_channels=512
 )
 
-state_dict = torch.load(os.path.join("ffhq-likelihood", "vae_trainable_may9.pth"))
+state_dict = torch.load(os.path.join("ffhq-likelihood", "vae_trainable_may8.pth"))
 # Remove 'module.' prefix
 new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
@@ -69,7 +76,7 @@ time_embed_dim = 512
 timestep_input_dim = 128
 time_proj = Timesteps(128, flip_sin_to_cos=True, downscale_freq_shift=0)
 time_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim, "silu")
-state_dict = torch.load(os.path.join("ffhq-likelihood", "time_embeddings_may9.pth"))
+state_dict = torch.load(os.path.join("ffhq-likelihood", "time_embeddings_may8.pth"))
 new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 time_embedding.load_state_dict(new_state_dict)
 time_embedding.requires_grad_(True)
@@ -105,7 +112,7 @@ time_embedding = time_embedding.to("cuda")
 
 prompt = "A high quality photo of a face"
 image = pipe(prompt, 512, 512,
-    num_inference_steps=50, likelihood_model=likelihood_model,
+    num_inference_steps=999, likelihood_model=likelihood_model,
     original_image=orig_image, time_proj=time_proj, time_embedding=time_embedding).images[0]  
 # image = pipe(prompt, 512, 512, num_inference_steps=200, constrain_latents=latents).images[0]  
 # image = pipe(prompt, 512, 512, latents=latents, num_inference_steps=50, constrain_output=orig_image, constrain_latents=latents).images[0]  

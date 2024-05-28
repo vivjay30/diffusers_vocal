@@ -7,6 +7,8 @@ __pycache__/
 
 # C extensions
 *.so
+*.png
+*.jpg
 
 # tests and logs
 tests/fixtures/cached_*_text.txt

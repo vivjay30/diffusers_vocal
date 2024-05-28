@@ -489,7 +489,7 @@ class DDPMScheduler(SchedulerMixin, ConfigMixin):
             else:
                 variance = (self._get_variance(t, predicted_variance=predicted_variance) ** 0.5) * variance_noise
 
-        pred_prev_sample = pred_prev_sample + variance
+        pred_prev_sample = pred_prev_sample# + variance
 
         if not return_dict:
             return (pred_prev_sample,)

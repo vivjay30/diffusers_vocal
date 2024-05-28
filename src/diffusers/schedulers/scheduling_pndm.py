@@ -387,6 +387,70 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
 
         return SchedulerOutput(prev_sample=prev_sample)
 
+    def step_plms_overall(
+        self,
+        curr_step: torch.FloatTensor,
+        timestep: int,
+        return_dict: bool = True,
+    ) -> Union[SchedulerOutput, Tuple]:
+        """
+        Predict the sample from the previous timestep by reversing the SDE. This function propagates the sample with
+        the linear multistep method. It performs one forward pass multiple times to approximate the solution.
+
+        Args:
+            model_output (`torch.FloatTensor`):
+                The direct output from learned diffusion model.
+            timestep (`int`):
+                The current discrete timestep in the diffusion chain.
+            sample (`torch.FloatTensor`):
+                A current instance of a sample created by the diffusion process.
+            return_dict (`bool`):
+                Whether or not to return a [`~schedulers.scheduling_utils.SchedulerOutput`] or tuple.
+
+        Returns:
+            [`~schedulers.scheduling_utils.SchedulerOutput`] or `tuple`:
+                If return_dict is `True`, [`~schedulers.scheduling_utils.SchedulerOutput`] is returned, otherwise a
+                tuple is returned where the first element is the sample tensor.
+
+        """
+        return curr_step
+        if self.num_inference_steps is None:
+            raise ValueError(
+                "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
+            )
+
+        if not self.config.skip_prk_steps and len(self.ets) < 3:
+            raise ValueError(
+                f"{self.__class__} can only be run AFTER scheduler has been run "
+                "in 'prk' mode for at least 12 iterations "
+                "See: https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/pipeline_pndm.py "
+                "for more information."
+            )
+
+        prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
+
+        if self.counter != 1:
+            self.ets = self.ets[-3:]
+            self.ets.append(curr_step)
+        else:
+            prev_timestep = timestep
+            timestep = timestep + self.config.num_train_timesteps // self.num_inference_steps
+
+        if len(self.ets) == 1 and self.counter == 0:
+            curr_step = curr_step
+        elif len(self.ets) == 1 and self.counter == 1:
+            curr_step = (curr_step + self.ets[-1]) / 2
+        elif len(self.ets) == 2:
+            curr_step = (3 * self.ets[-1] - self.ets[-2]) / 2
+        elif len(self.ets) == 3:
+            curr_step = (23 * self.ets[-1] - 16 * self.ets[-2] + 5 * self.ets[-3]) / 12
+        else:
+            curr_step = (1 / 24) * (55 * self.ets[-1] - 59 * self.ets[-2] + 37 * self.ets[-3] - 9 * self.ets[-4])
+
+        self.counter += 1
+
+        return curr_step
+
     def scale_model_input(self, sample: torch.FloatTensor, *args, **kwargs) -> torch.FloatTensor:
         """
         Ensures interchangeability with schedulers that need to scale the denoising model input depending on the
@@ -401,6 +465,87 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
                 A scaled input sample.
         """
         return sample
+
+
+    def update_on_model(self, sample, timestep, model_output):
+        # prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
+
+        # if self.counter == 1:
+        #     prev_timestep = timestep
+        #     timestep = timestep + self.config.num_train_timesteps // self.num_inference_steps
+
+        # alpha_prod_t = self.alphas_cumprod[timestep]
+        # alpha_prod_t_prev = self.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+        # beta_prod_t = 1 - alpha_prod_t
+        # beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+        # if self.config.prediction_type == "v_prediction":
+        #     model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        # elif self.config.prediction_type != "epsilon":
+        #     raise ValueError(
+        #         f"prediction_type given as {self.config.prediction_type} must be one of `epsilon` or `v_prediction`"
+        #     )
+
+        # # corresponds to (α_(t−δ) - α_t) divided by
+        # # denominator of x_t in formula (9) and plus 1
+        # # Note: (α_(t−δ) - α_t) / (sqrt(α_t) * (sqrt(α_(t−δ)) + sqr(α_t))) =
+        # # sqrt(α_(t−δ)) / sqrt(α_t))
+        # sample_coeff = (alpha_prod_t_prev / alpha_prod_t) ** (0.5)
+
+        # # corresponds to denominator of e_θ(x_t, t) in formula (9)
+        # model_output_denom_coeff = alpha_prod_t * beta_prod_t_prev ** (0.5) + (
+        #     alpha_prod_t * beta_prod_t * alpha_prod_t_prev
+        # ) ** (0.5)
+
+        # # full formula (9)
+        # prev_sample = (
+        #     sample_coeff * sample - (alpha_prod_t_prev - alpha_prod_t) * model_output / model_output_denom_coeff
+        # )
+
+        # return prev_sample
+
+        t = timestep
+        prev_t = timestep - self.config.num_train_timesteps // self.num_inference_steps
+
+        if model_output.shape[1] == sample.shape[1] * 2 and self.variance_type in ["learned", "learned_range"]:
+            model_output, predicted_variance = torch.split(model_output, sample.shape[1], dim=1)
+        else:
+            predicted_variance = None
+
+        # 1. compute alphas, betas
+        alpha_prod_t = self.alphas_cumprod[t]
+        alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.one
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+        current_alpha_t = alpha_prod_t / alpha_prod_t_prev
+        current_beta_t = 1 - current_alpha_t
+
+        current_beta_t_tilde = 1 - alpha_prod_t / alpha_prod_t_prev
+        current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t_tilde
+
+
+        # 2. compute predicted original sample from predicted noise also called
+        # "predicted x_0" of formula (15) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+
+
+        # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
+        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_original_sample_coeff = (alpha_prod_t_prev ** (0.5) * current_beta_t) / beta_prod_t
+        current_sample_coeff = current_alpha_t ** (0.5) * beta_prod_t_prev / beta_prod_t
+
+        # 5. Compute predicted previous sample µ_t
+        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_prev_sample = pred_original_sample_coeff * pred_original_sample + current_sample_coeff * sample
+
+        # 6. Add noise
+        variance = 0
+        if t > 0:
+            device = model_output.device
+            variance = torch.exp(0.5 * current_beta_variance) * torch.randn_like(sample)
+
+        pred_prev_sample = pred_prev_sample #+ variance
+        return pred_prev_sample
 
     def _get_prev_sample(self, sample, timestep, prev_timestep, model_output):
         # See formula (9) of PNDM paper https://arxiv.org/pdf/2202.09778.pdf

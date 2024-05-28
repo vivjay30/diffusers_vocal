@@ -982,8 +982,28 @@ class StableDiffusionPipeline(
         latents_grads = []
         noise_preds_grads = []
         mses = []
+        pred_sigmas = []
+        latents_means = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                latents_means.append((latents ** 2).mean())
+                if i >= 0:
+                    self.scheduler = self.scheduler_alternate
+                # latents_means = []
+                # for ttime in range(999, -1, -1):
+                #     latents_noised = self.scheduler.add_noise(latents, torch.randn_like(latents), torch.LongTensor([ttime]))
+                #     # t_emb = kwargs["time_proj"](t.unsqueeze(0))
+                #     # emb = kwargs["time_embedding"](t_emb)
+                #     # output = kwargs["likelihood_model"](latents_noised, emb)
+                #     # logvar = output[:, 3:6, :, :]
+                #     # # print(ttime)
+                #     latents_means.append((latents_noised**2).mean().item())
+                #     # print(logvar.mean())
+                #     print("-----")
+
+                # import pdb
+                # pdb.set_trace()
+
                 # print(f"{i} {t}")
                 # continue
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
@@ -1015,7 +1035,7 @@ class StableDiffusionPipeline(
                     continue
 
                 latents_original = latents.clone().detach()
-                scheduler_original = copy.deepcopy(self.scheduler)
+                # scheduler_original = copy.deepcopy(self.scheduler)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents_original] * 2) if self.do_classifier_free_guidance else latents_original
@@ -1046,16 +1066,17 @@ class StableDiffusionPipeline(
                 x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
                 save_to_image(x_hat_0[0], os.path.join("intermediate_outputs_ours_ffhq", f"{i}_z_0.png"))
 
-                scheduler_copy = copy.deepcopy(self.scheduler)
+                # scheduler_copy = copy.deepcopy(self.scheduler)
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                # latents = self.scheduler.update_on_model(noise_pred, t, latents)
                 z_prev_mu = latents.clone().detach()
 
 
                 # UNCOMMENT HERE
                 current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
                 current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
-
-                # latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
+                
+                latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
 
                 with torch.enable_grad():
                     # compute the previous noisy sample x_t -> x_t-1
@@ -1071,39 +1092,62 @@ class StableDiffusionPipeline(
                     Simple DPS
                     """
                     print(f"current beta variance {current_beta_variance}")
-                    for _ in range(10):
-                        if latents.grad is not None:
-                            latents.grad.zero_()
+                    latents_multiple = latents.repeat(1, 1, 1, 1).detach()
+                    latents_multiple.requires_grad_(True)
+                    for _ in range(0):
+                        if latents_multiple.grad is not None:
+                            latents_multiple.grad.zero_()
 
                         """
                         Ours
                         """
-                        print(f"Latents max {abs(latents).max()}")
+                        print(f"latents_multiple max {abs(latents_multiple).max()}")
                         with torch.no_grad():
-                            eta = 30 * current_beta_variance / (64 * 64 * 3) / 0.012
+                            # eta = 70 * current_beta_variance / (512 * 324 * 3) / 0.012
+                            eta = 20 / (64 * 64 * 3) * current_beta_variance / 0.012
                             print(f"eta {eta}")
+
+                        # if i < 5:
+                        #     eta *= 0.2  # Warmup
 
                         t_emb = kwargs["time_proj"](t.unsqueeze(0))
                         emb = kwargs["time_embedding"](t_emb)
-                        output = kwargs["likelihood_model"](latents, emb)
+                        output = kwargs["likelihood_model"](latents_multiple, emb)
 
                         mu = output[:, 0:3, :, :]  # Mean
                         save_to_image(mu[0].detach().cpu(), os.path.join("intermediate_outputs_ours_ffhq", f"{i}_p(y|z).png"))
                         logvar = output[:, 3:6, :, :]
                         save_to_image(logvar[0].detach().cpu() / 4 + 1, os.path.join("intermediate_outputs_ours_ffhq", f"{i}_sigma_p(y|z).png"))
                         # logvar = logvar.mean()
-                        sigma_squared = torch.exp(logvar)
-                        # curr_sigma_squared = sigma_squared.mean().clone().detach()
-                        # curr_sigma_squared.requires_grad_(False)
-                        # curr_sigma_squared = sigma_squared
-                        # print(f"Curr sigma squared {curr_sigma_squared}")
-                        # sigma_squared = torch.clamp(sigma_squared, min=1e-7)
-                        # with torch.no_grad():
-                        #     curr_sigma_squared = sigma_squared.mean()
-                        #     curr_sigma_squared = 50 * ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2).mean()
-                        nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * sigma_squared[:, :, ::8, ::8]) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (sigma_squared[:, :, ::8, ::8]))
-                        # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (curr_sigma_squared))
-                        # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::, ::] - mu[:, :, ::, ::]) ** 2) / (curr_sigma_squared))
+
+                        if t < 0:
+                            mu = self.vae.decode(latents_multiple / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                            curr_sigma_squared = torch.exp(torch.FloatTensor([0.004 * t - 6])).to(latents.device)
+                            nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (curr_sigma_squared))
+                        else:
+                            sigma_squared = torch.exp(logvar)
+                            # curr_sigma_squared = sigma_squared.mean().clone().detach()
+                            # curr_sigma_squared.requires_grad_(False)
+                            curr_sigma_squared = sigma_squared
+                            # sigma_squared = torch.clamp(sigma_squared, min=1e-7)
+                            # with torch.no_grad():
+                            #     curr_sigma_squared = sigma_squared.mean()
+                            # print(f"Curr sigma squared {curr_sigma_squared}")
+                            #     curr_sigma_squared = 50 * ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2).mean()
+                            nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * sigma_squared[:, :, ::8, ::8]) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (sigma_squared[:, :, ::8, ::8]))
+
+                            # nll_per_pixel_first256 = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared[:, :, :, :256]) +
+                            #                                 ((kwargs["original_image"][:, :, :, :256] - mu[:, :, :, :256]) ** 2) /
+                            #                                 curr_sigma_squared[:, :, :, :256])
+
+                            # nll_per_pixel_last128 = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared[:, :, :, -128:]) +
+                            #                                ((kwargs["original_image"][:, :, :, -128:] - mu[:, :, :, -128:]) ** 2) /
+                            #                                curr_sigma_squared[:, :, :, -128:])
+
+                            # Concatenate along the width dimension (last dimension, typically dimension 3 in BCHW format)
+                            # nll_per_pixel = torch.cat((nll_per_pixel_first256, nll_per_pixel_last128), dim=3)
+
+                            # nll_per_pixel = 0.5 * (torch.log(2 * torch.pi * curr_sigma_squared) + ((kwargs["original_image"][:, :, ::8, ::8] - mu[:, :, ::8, ::8]) ** 2) / (curr_sigma_squared))
 
                         nll = torch.sum(nll_per_pixel)
                         (nll).backward()
@@ -1111,19 +1155,32 @@ class StableDiffusionPipeline(
                         logvars.append(nll)
                         print(f"Curr sigma {curr_sigma}")
                         print(f"{i}")
+                        pred_sigmas.append(curr_sigma_squared)
                         # Langevin Dynamics
-                        latents_grad = latents.grad.clone().detach()
+                        # latents_multiple_grad = latents_multiple.grad.clone().detach()
 
                         with torch.no_grad():
                             if current_beta_variance <= 1e-10: continue 
-                            z_pred_grad = (latents - z_prev_mu) / current_beta_variance
-                            latents_grads.append((latents.grad ** 2).sum() ** 0.5)
-                            print(f"Latents grad {latents_grads[-1]}")
-                            latents -= eta * (latents.grad + z_pred_grad)#  + (2 * eta) ** 0.5 * torch.randn_like(latents)
-                            # latents -= eta * (latents.grad)
+                            # latents_multiple_grads.append((latents_multiple.grad ** 2).sum() ** 0.5)
+                            # print(f"latents_multiple grad {latents_multiple_grads[-1]}")
+                            if i >= 0:
+                                z_pred_grad = (latents_multiple - z_prev_mu) / current_beta_variance
+                                latents_multiple -= eta * (latents_multiple.grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(latents)
+                                # latents_multiple -= eta * (latents_multiple.grad)
+                                # z_pred_grad = (latents_multiple - z_prev_mu) / current_beta_variance
+                                # latents_multiple -= eta * z_pred_grad
+                                # latents_multiple += (2 * eta) ** 0.5 * torch.randn_like(latents)
 
-                update_scheduler_ets(self.scheduler, scheduler_copy, t, latents_original, latents)
-                print((scheduler_copy.step(self.scheduler.ets[-1], t, latents_original, return_dict=False)[0] - latents).max())
+                            else:
+                                latents_multiple -= eta * (latents_multiple.grad)
+                    latents = latents_multiple.mean(dim=0, keepdim=True)
+
+                # actual_noise = noise_pred + (latents_original - latents) / (torch.linalg.norm(latents_original - latents)) * torch.linalg.norm(noise_pred)
+                # latents = self.scheduler.step(actual_noise, t, latents_original, **extra_step_kwargs, return_dict=False)[0]
+                # curr_step = self.scheduler.step_plms_overall(latents - latents_original, t)
+                # latents = latents_original + curr_step
+                # update_scheduler_ets(self.scheduler, scheduler_copy, t, latents_original, latents)
+                # print((scheduler_copy.step(self.scheduler.ets[-1], t, latents_original, return_dict=False)[0] - latents).max())
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -1142,8 +1199,6 @@ class StableDiffusionPipeline(
                         step_idx = i // getattr(self.scheduler, "order", 1)
                         callback(step_idx, t, latents)
 
-        import pdb
-        pdb.set_trace()
         if not output_type == "latent":
             image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
                 0
