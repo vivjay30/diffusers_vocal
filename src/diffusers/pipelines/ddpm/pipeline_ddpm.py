@@ -15,10 +15,25 @@
 
 from typing import List, Optional, Tuple, Union
 
+import os
 import torch
+
+from torchvision.transforms import ToPILImage
 
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
+
+
+def save_to_image(tensor, filename):
+    to_save = (tensor + 1) / 2
+    to_save = to_save.clamp(0, 1)
+
+    # Convert to PIL Image
+    transform = ToPILImage()
+    img = transform(to_save)
+
+    # Save the image
+    img.save(filename)
 
 
 class DDPMPipeline(DiffusionPipeline):
@@ -50,6 +65,7 @@ class DDPMPipeline(DiffusionPipeline):
         num_inference_steps: int = 1000,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
+        original_image = None
     ) -> Union[ImagePipelineOutput, Tuple]:
         r"""
         The call function to the pipeline for generation.
@@ -109,12 +125,47 @@ class DDPMPipeline(DiffusionPipeline):
         # set step values
         self.scheduler.set_timesteps(num_inference_steps)
 
-        for t in self.progress_bar(self.scheduler.timesteps):
+        for i, t in enumerate(self.progress_bar(self.scheduler.timesteps)):
+            # image = self.scheduler.add_noise(original_image, torch.randn_like(image), torch.LongTensor([t]))
+            # save_to_image(image[0], os.path.join("intermediate_outputs_ours_ffhq", f"{t}.png"))
+
+            alpha_prod_t = self.scheduler.alphas_cumprod[t]
+            alpha_prod_t_prev = self.scheduler.alphas_cumprod[t-1] if t-1 >= 0 else self.scheduler.one
+            alpha_prod_t_prev_prev = self.scheduler.alphas_cumprod[t-2] if t-2 >= 0 else self.scheduler.one
+            beta_prod_t = 1 - alpha_prod_t
+            beta_prod_t_prev = 1 - alpha_prod_t_prev
+            current_alpha_t = alpha_prod_t / alpha_prod_t_prev
+            current_beta_t = 1 - current_alpha_t
+            current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
+
+            eta = 0.001 * current_beta_variance # 1 / (1 / (current_beta_variance) + (alpha_prod_t_prev) / (1 - alpha_prod_t_prev))
             # 1. predict noise model_output
             model_output = self.unet(image, t).sample
 
             # 2. compute previous image: x_t -> x_t-1
             image = self.scheduler.step(model_output, t, image, generator=generator).prev_sample
+            z_prev_mu = image.clone().detach()
+            image = image + torch.randn_like(image) * (current_beta_variance ** 0.5)
+            z_0 = (image - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+            
+            # if i % 10 == 0:
+            save_to_image(image[0], os.path.join("intermediate_outputs_ours_ffhq", f"{t}.png"))
+            save_to_image(z_0[0], os.path.join("intermediate_outputs_ours_ffhq", f"{t}_z_0.png"))
+
+            for _ in range(1000):
+                if t <= 1:
+                    # Eta is 0 at t = 0
+                    break
+
+                likelihood_grad = (1 / (alpha_prod_t_prev ** 0.5) * image - original_image) * (1 / alpha_prod_t_prev ** 0.5) * (alpha_prod_t_prev / (1 - alpha_prod_t_prev))
+                z_pred_grad = (image - z_prev_mu) / current_beta_variance
+                # superres = torch.zeros_like(likelihood_grad)
+                # superres[:, :, ::8, ::8] = 1
+                # likelihood_grad *= superres
+                likelihood_grad[:, :, :128, :] = 0
+                image[:, :, 128:, :] -= (eta * (likelihood_grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(image))[:, :, 128:, :]
+
+
 
         image = (image / 2 + 0.5).clamp(0, 1)
         image = image.cpu().permute(0, 2, 3, 1).numpy()
