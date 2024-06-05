@@ -251,6 +251,7 @@ class PNDMScheduler(SchedulerMixin, ConfigMixin):
                 tuple is returned where the first element is the sample tensor.
 
         """
+        raise ValueError("Shouldn't be using PNDM")
         if self.counter < len(self.prk_timesteps) and not self.config.skip_prk_steps:
             return self.step_prk(model_output=model_output, timestep=timestep, sample=sample, return_dict=return_dict)
         else:

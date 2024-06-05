@@ -1027,20 +1027,50 @@ class StableDiffusionPipeline(
                 curr_var = (1 - a_t)
                 curr_sigma = curr_var ** 0.5
 
-                eta = 0.08 * current_beta_variance
+                eta = 0.000001 * (1 - alpha_prod_t_prev) / alpha_prod_t_prev
                 # DPS style
                 print(i)
-                for j in range(5):
+
+                latents = latents.clone().detach().requires_grad_(True)
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                # predict the noise residual
+                noise_pred = self.unet(
+                    latent_model_input,
+                    t,
+                    encoder_hidden_states=prompt_embeds,
+                    timestep_cond=timestep_cond,
+                    cross_attention_kwargs=self.cross_attention_kwargs,
+                    added_cond_kwargs=added_cond_kwargs,
+                    return_dict=False,
+                )[0]
+
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                z_prev_mu = latents.clone().detach()
+                latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
+
+                for j in range(0):
                     with torch.enable_grad():
                         latents = latents.clone().detach().requires_grad_(True)
                         # expand the latents if we are doing classifier free guidance
                         latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t-1)
 
                         # predict the noise residual
                         noise_pred = self.unet(
                             latent_model_input,
-                            t,
+                            t-1,
                             encoder_hidden_states=prompt_embeds,
                             timestep_cond=timestep_cond,
                             cross_attention_kwargs=self.cross_attention_kwargs,
@@ -1057,34 +1087,39 @@ class StableDiffusionPipeline(
                             # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
                             noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
-                        if True:
-                        # if i % 10 == 0:
-                            z_hat_0 = (latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
-                            x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
-                            sigma_squared = 0.1 * (1 - alpha_prod_t) / alpha_prod_t# 0.4 * current_beta_variance / 0.012                        
-                            diff = torch.sum((kwargs["original_image"] - x_hat_0) ** 2) / (sigma_squared)
-                            # print(diff)
-                            diff.backward()
+                        z_hat_0 = (latents - beta_prod_t_prev ** (0.5) * noise_pred) / alpha_prod_t_prev ** (0.5)
+                        x_hat_0 = self.vae.decode(z_hat_0 / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0]
+                        # jacobian = torch.autograd.functional.jacobian(lambda x: self.vae.decode(x / self.vae.config.scaling_factor, return_dict=False, generator=generator)[0], z_hat_0)
+                        sigma_squared = 0.4 * (1 - alpha_prod_t_prev) / alpha_prod_t_prev
+                        # sigma_squared = 0.4 * current_beta_variance / 0.012 # * (1 - alpha_prod_t) / alpha_prod_t# 0.4 * current_beta_variance / 0.012                        
+                        diff = torch.sum((kwargs["original_image"] - x_hat_0) ** 2)
+                        norm = torch.linalg.norm((kwargs["original_image"] - x_hat_0))
+                        print(f"Diff {diff}")
+                        diff = diff / sigma_squared
+                        diff.backward()
 
-                            latents_grads.append(torch.linalg.norm(latents.grad))
-                            with torch.no_grad():
-                                z_prev_mu = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0].clone().detach()
-                                z_pred_grad = (latents - z_prev_mu) / current_beta_variance
-                                print(f"Latents grad {latents_grads[-1]}")
-                                print(f"regularizer grad {torch.linalg.norm(z_pred_grad)}")
+                        latents_grads.append(torch.linalg.norm(latents.grad))
+                        with torch.no_grad():
+                            # z_prev_mu = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0].clone().detach()
+                            z_pred_grad = (latents - z_prev_mu) / current_beta_variance
+                            print(f"Latents grad {latents_grads[-1]}")
+                            print(f"regularizer grad {torch.linalg.norm(z_pred_grad)}")
 
-                                save_to_image(x_hat_0[0], os.path.join("intermediate_outputs_ours_ffhq", f"{i}_z_0.png"))
+                            save_to_image(x_hat_0[0], os.path.join("intermediate_outputs_ours_ffhq", f"{i}_z_0.png"))
 
-                                curr_output = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
-                                save_to_image(curr_output[0], os.path.join("intermediate_outputs_ours_ffhq", f"{i}.png"))
-
-                                latents -= eta * (latents.grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(latents)
+                            curr_output = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+                            save_to_image(curr_output[0], os.path.join("intermediate_outputs_ours_ffhq", f"{i}.png"))
+                            grad = latents.grad.clone().detach()
+                            # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                            # latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
+                            # latents -= 0.0003 * (grad)
+                            latents -= eta * (latents.grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(latents)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-                # z_prev_mu = latents.clone().detach()
-                current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
-                latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
+                # latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                # # z_prev_mu = latents.clone().detach()
+                # current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
+                # latents = latents + torch.randn_like(latents) * (current_beta_variance ** 0.5)
                 continue
 
 
