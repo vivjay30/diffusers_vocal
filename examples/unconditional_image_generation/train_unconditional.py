@@ -380,7 +380,7 @@ def main(args):
         )
     else:
         config = UNet2DModel.load_config(args.model_config_name_or_path)
-        model = UNet2DModel.from_config(config)
+        model = UNet2DModel.from_pretrained(args.model_config_name_or_path)
 
     # Create EMA for the model.
     if args.use_ema:
