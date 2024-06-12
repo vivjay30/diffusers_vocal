@@ -138,7 +138,7 @@ class DDPMPipeline(DiffusionPipeline):
             current_beta_t = 1 - current_alpha_t
             current_beta_variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
 
-            eta = 0.001 * current_beta_variance # 1 / (1 / (current_beta_variance) + (alpha_prod_t_prev) / (1 - alpha_prod_t_prev))
+            eta = 0.1 * current_beta_variance # 1 / (1 / (current_beta_variance) + (alpha_prod_t_prev) / (1 - alpha_prod_t_prev))
             # 1. predict noise model_output
             model_output = self.unet(image, t).sample
 
@@ -152,18 +152,25 @@ class DDPMPipeline(DiffusionPipeline):
             save_to_image(image[0], os.path.join("intermediate_outputs_ours_ffhq", f"{t}.png"))
             save_to_image(z_0[0], os.path.join("intermediate_outputs_ours_ffhq", f"{t}_z_0.png"))
 
-            for _ in range(1000):
+            for _ in range(100):
                 if t <= 1:
                     # Eta is 0 at t = 0
                     break
-
-                likelihood_grad = (1 / (alpha_prod_t_prev ** 0.5) * image - original_image) * (1 / alpha_prod_t_prev ** 0.5) * (alpha_prod_t_prev / (1 - alpha_prod_t_prev))
+                image = image.clone().detach().requires_grad_()
+                with torch.enable_grad():
+                    model_output = self.unet(image, t - 1).sample
+                    z_0 = (image - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+                    next_image = self.scheduler.step(model_output, t - 1, image, generator=generator).prev_sample
+                    logprob = 1/2 * (alpha_prod_t_prev / (1 - alpha_prod_t_prev)) * (z_0 - original_image) ** 2
+                    logprob[:, :, 128:, :].sum().backward()
+                    print(((z_0 - original_image) ** 2).mean())
+                # likelihood_grad = (1 / (alpha_prod_t_prev ** 0.5) * image - original_image) * (1 / alpha_prod_t_prev ** 0.5) * (alpha_prod_t_prev / (1 - alpha_prod_t_prev))
                 z_pred_grad = (image - z_prev_mu) / current_beta_variance
                 # superres = torch.zeros_like(likelihood_grad)
                 # superres[:, :, ::8, ::8] = 1
                 # likelihood_grad *= superres
-                likelihood_grad[:, :, :128, :] = 0
-                image[:, :, 128:, :] -= (eta * (likelihood_grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(image))[:, :, 128:, :]
+                # likelihood_grad[:, :, :128, :] = 0
+                image -= (eta * (2 * image.grad + z_pred_grad) + (2 * eta) ** 0.5 * torch.randn_like(image))
 
 
 
