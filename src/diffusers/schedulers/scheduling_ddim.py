@@ -349,6 +349,7 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
         generator=None,
         variance_noise: Optional[torch.FloatTensor] = None,
         return_dict: bool = True,
+        original_image = None
     ) -> Union[DDIMSchedulerOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
@@ -431,6 +432,8 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
             pred_original_sample = pred_original_sample.clamp(
                 -self.config.clip_sample_range, self.config.clip_sample_range
             )
+
+        # pred_original_sample[:, :, 128:, :] = original_image[:, :, 128:, :]
 
         # 5. compute variance: "sigma_t(η)" -> see formula (16)
         # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
