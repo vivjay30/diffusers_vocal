@@ -45,12 +45,13 @@ def load_yaml(file_path: str) -> dict:
     return config
 
 def main(args):
+    print(f"i {args.original_image_prefix}")
     # generator = DiffusionPipeline.from_pretrained("ffhq_jun4_256").to("cuda")
     # image = generator().images[0]
     # image.save("test.png")
-    generator = DiffusionPipeline.from_pretrained("lowlevelware/512x512_diffusion_unconditional_ImageNet").to("cuda")
+    generator = DiffusionPipeline.from_pretrained("google/ddpm-celebahq-256").to("cuda")
 
-    model_config = load_yaml("dps_model/imagenet_model_config.yaml")
+    model_config = load_yaml("dps_model/model_config.yaml")
     # Load model
     model = create_model(**model_config)
     model = model.to("cuda")
@@ -123,14 +124,14 @@ def main(args):
     # orig_image = Image.open(f"/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/face_input_512.jpg")
     # orig_image = Image.open(f"/gscratch/realitylab/vjayaram/celebhq/{args.original_image_prefix}.jpg")
     try:
-        orig_image = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset/ffhq256/test/{args.original_image_prefix}.png")
+        original_image = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset/ffhq256/test/{args.original_image_prefix}.png")
     except:
-        orig_image = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset/ffhq256/train/{args.original_image_prefix}.png")
+        original_image = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset/ffhq256/train/{args.original_image_prefix}.png")
 
 
-    original_image = Image.open(f"partial_4.png")
-    mask = Image.open(f"mask_4.png")
-    gt = Image.open(f"gt_4.png")
+    # original_image = Image.open(f"partial_4.png")
+    # mask = Image.open(f"mask_4.png")
+    # gt = Image.open(f"gt_4.png")qgitq
     # orig_image = Image.open(f"sparse_3d.png")
     # orig_image = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset//{args.original_image_prefix}.png")
     # orig_image = Image.open("/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/celeb_256.jpeg")
@@ -139,13 +140,13 @@ def main(args):
     # orig_image = np.array(orig_image)
     orig_image = torch.from_numpy(orig_image).unsqueeze(0).permute(0, 3, 1, 2)
     orig_image = orig_image.to("cuda")[:, :3]
-    OPERATOR = create_mask_function(torch.from_numpy(np.array(original_image)).unsqueeze(0).permute(0, 3, 1, 2).to("cuda")[:, :3])
+    # OPERATOR = create_mask_function(torch.from_numpy(np.array(original_image)).unsqueeze(0).permute(0, 3, 1, 2).to("cuda")[:, :3])
     orig_image = orig_image / 127.5 - 1.0 # Convert to (-1, 1)
     orig_image = orig_image.to(torch.float)
     observation = OPERATOR(orig_image)
-    orig_image_denoised = torch.from_numpy(np.array(gt)).unsqueeze(0).permute(0, 3, 1, 2).to("cuda")[:, :3] / 127.5 - 1.0
+    # orig_image_denoised = torch.from_numpy(np.array(gt)).unsqueeze(0).permute(0, 3, 1, 2).to("cuda")[:, :3] / 127.5 - 1.0
 
-    # observation += torch.randn_like(observation) * NOISE
+    observation += torch.randn_like(observation) * NOISE
 
     observation_visualize = (observation.permute(0, 2, 3, 1).cpu().numpy() / 2 + 0.5).clip(0, 1)
     output = generator.numpy_to_pil(observation_visualize)[0]#.resize((256, 256))
@@ -158,21 +159,23 @@ def main(args):
         original_image=orig_image,
         observation=observation,
         noise=NOISE,
-        num_inference_steps=50,
+        num_inference_steps=20,
+        K=args.K,
         dps_model=model,
         operator=OPERATOR,
-        original_image_denoised=orig_image_denoised)
+        original_image_denoised=None)
     image, grads = result[0].images[0], result[1]
 
-    # with open(f"grad_experiments/random_inpainting/ffhq/100_steps_kl/{args.original_image_prefix}_grads.json", "w") as f:
+    # with open(f"grad_experiments/random_inpainting/ffhq/20_steps_kl/{args.original_image_prefix}_grads.json", "w") as f:
     #     json.dump(grads, f)
 
-    # image.save(f"grad_experiments/superres/ffhq_4x_kl/50_steps/{args.original_image_prefix}.png")
-    # image.save(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/kl_100steps_10k/{args.original_image_prefix}.png")
-    image.save(f"test.png")
+    # image.save(f"grad_experiments/random_inpainting/ffhq/100_steps_l2/{args.original_image_prefix}.png")
+    image.save(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/kl_20steps_{args.K}k/{args.original_image_prefix}.png")
+    # image.save(f"test.png")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("original_image_prefix", type=str)
+    parser.add_argument("K", type=int)
     main(parser.parse_args())

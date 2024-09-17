@@ -14,8 +14,8 @@ def calculate_psnr(img1, img2):
 all_psnrs = []
 for i in range(0, 1000):
     # Load the images using PIL
-    # img1 = Image.open("test.png")
-    img1 = Image.open(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/l2_5steps_50k/firstk/{i:05d}.png")
+    img1 = Image.open("test.png")
+    # img1 = Image.open(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/l2_5steps_50k/firstk/{i:05d}.png")
     # img2 = Image.open("/gscratch/realitylab/vjayaram/celebhq/00000.jpg")
     img2 = Image.open(f"/gscratch/realitylab/vjayaram/ffhq-dataset/ffhq256/train/{i:05d}.png")
     # img2 = Image.open("/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/face_input_512.jpg")
@@ -34,5 +34,6 @@ for i in range(0, 1000):
     print(f"i {i} PSNR: {psnr_value} dB")
     all_psnrs.append(psnr_value)
     print(np.mean(all_psnrs))
+    break
 
 print(np.mean(all_psnrs))
