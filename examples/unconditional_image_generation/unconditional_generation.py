@@ -114,11 +114,12 @@ def main(args):
 
     generator.scheduler = ddim_scheduler
 
-    NOISE = 0.1
+    NOISE = 0.0
     # OPERATOR = super_res_operator.forward
-    OPERATOR = ConsistentRandomPixelSelector(device="cuda")
+    # OPERATOR = ConsistentRandomPixelSelector(device="cuda")
     # OPERATOR = neighboring_diffs
     # OPERATOR = operator_A
+    OPERATOR = lambda x: x
 
     # generator = DiffusionPipeline.from_pretrained("Hug-fsneng1/ddpm-phoenix-512").to("cuda")
     # orig_image = Image.open(f"/gscratch/realitylab/vjayaram/diffusers/examples/text_to_image/face_input_512.jpg")
@@ -137,6 +138,10 @@ def main(args):
     # orig_image = Image.open("/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/celeb_256.jpeg")
     # orig_image = Image.open("/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/lsun_church.png")
     orig_image = np.array(original_image.resize((256, 256), Image.BICUBIC))
+
+    # POISON NOISE
+    orig_image = np.random.poisson(lam=(orig_image * 0.3).astype(np.uint8)) / 0.3
+
     # orig_image = np.array(orig_image)
     orig_image = torch.from_numpy(orig_image).unsqueeze(0).permute(0, 3, 1, 2)
     orig_image = orig_image.to("cuda")[:, :3]
@@ -159,19 +164,19 @@ def main(args):
         original_image=orig_image,
         observation=observation,
         noise=NOISE,
-        num_inference_steps=20,
+        num_inference_steps=50,
         K=args.K,
         dps_model=model,
         operator=OPERATOR,
         original_image_denoised=None)
     image, grads = result[0].images[0], result[1]
 
-    # with open(f"grad_experiments/random_inpainting/ffhq/20_steps_kl/{args.original_image_prefix}_grads.json", "w") as f:
-    #     json.dump(grads, f)
+    with open(f"grad_experiments/random_inpainting/ffhq/50_steps_poisson/{args.original_image_prefix}_grads.json", "w") as f:
+        json.dump(grads, f)
 
     # image.save(f"grad_experiments/random_inpainting/ffhq/100_steps_l2/{args.original_image_prefix}.png")
-    image.save(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/kl_20steps_{args.K}k/{args.original_image_prefix}.png")
-    # image.save(f"test.png")
+    # image.save(f"/gscratch/realitylab/vjayaram/diffusers/examples/unconditional_image_generation/experiments/ffhq/inpainting_random/kl_20steps_{args.K}k/{args.original_image_prefix}.png")
+    image.save(f"test.png")
 
 
 if __name__ == '__main__':
