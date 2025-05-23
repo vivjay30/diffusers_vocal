@@ -18,10 +18,10 @@ for filename in os.listdir(directory):
         with open(os.path.join(directory, filename), 'r') as f:
             content = json.load(f)
             for x, y in content:
-                # data[x].append(y)
-                if x not in seen_x:
-                    data[x].append(y)
-                    seen_x.add(x)
+                data[x].append(y)
+                # if x not in seen_x:
+                #     data[x].append(y)
+                #     seen_x.add(x)
 
 # Convert the aggregated data to lists of x, y, mean, and std
 x_values = sorted(data.keys())
@@ -29,8 +29,6 @@ y_values = [data[x] for x in x_values]
 means = [np.sqrt(np.mean(np.array(y)**2)) for y in y_values]
 stds = [np.std(y) for y in y_values]
 print({x_values[i]: means[i] for i in range(len(x_values))})
-import pdb
-pdb.set_trace()
 
 # Scatter plot of all values
 plt.figure(figsize=(10, 6))
@@ -56,6 +54,7 @@ plt.figure(figsize=(10, 6))
 plt.errorbar(x_values, means, yerr=stds, fmt='o', color='blue', ecolor='red', capsize=5)
 plt.xlabel('t')
 plt.ylabel('||grad||')
+plt.yscale('log')
 # plt.ylim(0, 10)
 plt.title(f'{algorithm}, Mean Values with 1 Std Deviation')
 plt.savefig('scatter_mean_std_values.png')
