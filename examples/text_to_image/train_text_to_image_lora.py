@@ -125,8 +125,10 @@ def log_validation(
         autocast_ctx = torch.autocast(accelerator.device.type)
 
     with autocast_ctx:
-        for _ in range(args.num_validation_images):
-            images.append(pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0])
+        for i in range(args.num_validation_images):
+            image = pipeline(args.validation_prompt, num_inference_steps=30, generator=generator).images[0]
+            images.append(image)
+            image.save(os.path.join(args.output_dir, f"epoch{epoch}_image{i}.png"))
 
     for tracker in accelerator.trackers:
         phase_name = "test" if is_final_validation else "validation"
@@ -607,12 +609,21 @@ def main():
         # See more about loading custom images at
         # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
 
+    # Add the dummy caption
+    def add_caption(example):
+        example["text"] = ["melodic house with singing"]
+        return example
+
+    dataset = dataset.map(add_caption, batched=False)
+
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
     column_names = dataset["train"].column_names
 
     # 6. Get the column names for input/target.
-    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    # dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    dataset_columns = ["image", "text"]
+
     if args.image_column is None:
         image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
@@ -967,7 +978,6 @@ def main():
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )
-
     accelerator.end_training()
 
 

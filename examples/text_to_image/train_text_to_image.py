@@ -23,6 +23,7 @@ import shutil
 from contextlib import nullcontext
 from pathlib import Path
 
+import random
 import accelerate
 import datasets
 import numpy as np
@@ -64,6 +65,62 @@ logger = get_logger(__name__, log_level="INFO")
 DATASET_NAME_MAPPING = {
     "lambdalabs/naruto-blip-captions": ("image", "text"),
 }
+
+# PROMPTS = [
+#     "melodic house",
+#     # "melodic house track",
+#     # "melodic house with vocals",
+#     # "progressive melodic house",
+#     # "tech house",
+#     # "tech house with vocals"
+# ]
+
+PROMPTS = {
+    "adamk_soha": ["adam k and soha", "progressive house", "uplifting", "emotional", "melodic house"],
+    "and_we_knew": ["lane 8", "melodic house", "uplifting", "emotional", "deep house"],
+    "armin_van_buuren": ["armin van buuren", "trance", "progressive", "anthemic", "high energy", "classic edm", "high energy"],
+    "avicii_mix": ["avicii", "progressive house", "anthemic", "pop", "melodic", "emotional", "uplifting", "high energy"],
+    "axwell_ingrosso": ["axwell and ingrosso", "big room", "swedish house mafia", "festival", "pop", "anthemic", "high energy"],
+    "ben_bohmer": ["ben bohmer", "melodic house", "deep house", "lush", "emotional"],
+    "best_of_sultan_and_shepard": ["sultan and shepard", "melodic house", "deep house", "lush", "uplifting", "emotional"],
+    "brightest_lights_album": ["lane 8", "melodic house", "lush", "deep house", "emotional", "sunset"],
+    "buggy": ["lane 8", "melodic house", "deep house", "emotional"],
+    "childish_album": ["lane 8", "melodic house", "deep house", "emotional", "sunset"],
+    "cri_album": ["cri", "melodic house", "emotional", "deep house"],
+    "deadmaus5_mix": ["deadmau5", "progressive house", "deep house", "dark", "emotional", "high energy"],
+    "elderbrook_vip_mix": ["elderbrook", "deep house", "melodic house", "emotional", "lush"],
+    "eli_and_fur": ["eli and fur", "melodic house", "deep house", "emotional"],
+    "embrz": ["embrz", "chill house", "melodic house", "deep house", "lush", "uplifting"],
+    "fred_again_mix": ["fred again", "emotional", "pop", "high energy"],
+    "jai_wolf": ["jai wolf", "melodic", "emotional", "lush", "high energy"],
+    "jerro_chromatic": ["jerro", "melodic house", "progressive", "emotional", "uplifting", "deep house", "sunset"],
+    "kaskade_dance_love": ["kaskade", "uplifting", "festival", "pop house", "progressive house"],
+    "kaskade_dynasty": ["kaskade", "progressive house", "deep house", "melodic", "emotional", "progressive", "uplifting"],
+    "kx5_album": ["kx5", "kaskade", "deadmau5", "tech house", "melodic", "high energy"],
+    "le_youth_mix": ["le youth", "melodic house", "uplifting", "emotional", "progressive", "deep house"],
+    "little_by_little_album": ["lane 8", "melodic house", "lush synths", "uplifting", "deep house", "sunset"],
+    "luttrell_mix": ["luttrell", "melodic", "deep house", "sunset", "lush"],
+    "marsh_mix": ["marsh", "melodic house", "emotional", "uplifting", "progressive", "sunset"],
+    "nora_en_pure_mix": ["nora en pure", "deep house", "melodic", "uplifting", "sunset"],
+    "porter_robinson_worlds": ["porter robinson", "emotional", "progressive house", "melodic", "pop", "high energy"],
+    "reminders_album": ["le youth", "melodic house", "deep house", "lush", "sunset"],
+    "reviver_album": ["lane 8", "melodic house", "anthemic", "progressive", "festival", "uplifting"],
+    "rise_album_full": ["lane 8", "melodic house", "sunset", "lush", "deep house"],
+    "strobelite_seduction": ["kaskade", "emotional", "uplifting", "progressive house", "melodic"],
+    "summer_house_mix_motry": ["house", "sunset", "uplifting", "melodic", "high energy"],
+    "swedish_house_mafia_mix": ["swedish house mafia", "festival", "anthemic", "pop", "progressive house", "classic edm", "high energy"],
+    "sultan_and_shepard": ["sultan and shepard", "melodic house", "deep house", "emotional", "progressive", "uplifting"],
+    "yotto_mix": ["yotto", "deep house", "dark", "emotional"],
+    "zedd_mix": ["zedd", "pop", "anthemic", "uplifting", "festival", "high energy"],
+    "chris_lake_mix": ["chris lake", "tech house", "dark", "festival", "high energy"],
+    "eli_brown_edc_2025": ["eli brown", "techno", "tech house", "dark", "high energy"],
+    "gorgon_city_edc_2025": ["gorgon city", "tech house", "deep house", "emotional", "high energy"],
+    "tech_house_mix": ["tech house", "dark", "deep house", "festival", "high energy"],
+    "dom_dolla_bbc": ["dom dolla", "tech house", "dark", "festival", "high energy"],
+    "fisher_mix_2025": ["fisher", "tech house", "festival", "dark", "high energy"],
+    "map_p_edc_2025": ["mau p", "melodic techno", "tech house", "dark", "festival", "high energy"],
+}
+
 
 
 def save_model_card(
@@ -174,6 +231,8 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
             image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
 
         images.append(image)
+        image.save(os.path.join(args.output_dir, f"epoch{epoch}_image{i}.png"))
+
 
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
@@ -350,6 +409,9 @@ def parse_args():
             'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
             ' "constant", "constant_with_warmup"]'
         ),
+    )
+    parser.add_argument(
+        "--finetune_encoder", action="store_true", help="Whether or not to finetune the encoder."
     )
     parser.add_argument(
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
@@ -605,11 +667,17 @@ def main():
     # `from_pretrained` So CLIPTextModel and AutoencoderKL will not enjoy the parameter sharding
     # across multiple gpus and only UNet2DConditionModel will get ZeRO sharded.
     with ContextManagers(deepspeed_zero_init_disabled_context_manager()):
-        text_encoder = CLIPTextModel.from_pretrained(
-            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-        )
+        if not args.finetune_encoder:
+            text_encoder = CLIPTextModel.from_pretrained(
+                args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+            )
         vae = AutoencoderKL.from_pretrained(
             args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
+        )
+
+    if args.finetune_encoder:
+        text_encoder = CLIPTextModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
         )
 
     unet = UNet2DConditionModel.from_pretrained(
@@ -618,7 +686,11 @@ def main():
 
     # Freeze vae and text_encoder and set unet to trainable
     vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
+
+    if args.finetune_encoder:
+        text_encoder.train()
+    else:
+        text_encoder.requires_grad_(False)
     unet.train()
 
     # Create EMA for the unet.
@@ -689,6 +761,10 @@ def main():
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
 
+        if args.finetune_encoder:
+            text_encoder.config.use_gradient_checkpointing = True
+            text_encoder.text_model.gradient_checkpointing = True
+
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -712,9 +788,17 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
+
+    if args.finetune_encoder:
+        params_to_optimize = [
+            {"params": unet.parameters(), "lr": args.learning_rate},
+            {"params": text_encoder.parameters(), "lr": args.learning_rate}
+        ]
+    else:
+        params_to_optimize = [{"params": unet.parameters(), "lr": args.learning_rate}]
+
     optimizer = optimizer_cls(
-        unet.parameters(),
-        lr=args.learning_rate,
+        params_to_optimize,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -745,12 +829,65 @@ def main():
         # See more about loading custom images at
         # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
 
+    # Get vocal spectrogram files
+    vocals_dir = "/gscratch/realitylab/vjayaram/vocal_diffusion/edm_with_vocals_spectrograms/"
+    vocal_files = set()
+
+    for dirpath, _, filenames in os.walk(vocals_dir):
+        for fname in filenames:
+            vocal_files.add(fname)  # Store just the filename, not full path
+
+    # Step 2: Batched caption function
+    def add_caption(batch):
+        texts = []
+
+        for image in batch["image"]:
+            filename = os.path.basename(image.filename)  # e.g., adamk_soha.mp3_chunk5_img633.png
+
+            # Normalize to match vocal_files: remove ".mp3" if present
+            normalized = filename.replace(".mp3", "")  # → adamk_soha_chunk5_img633.png
+
+            # For prompt lookup: get "adamk_soha" (strip both .mp3 and _chunk...)
+            root = filename.split("_chunk")[0].replace(".mp3", "")
+
+            if random.random() < 0.0:
+                texts.append("")
+                continue
+
+            tags = PROMPTS[root]
+            # artist = tags[0]
+            # other_tags = tags[1:]
+            selected_tags =  [tag for tag in tags if random.random() < 0.6]
+
+            if normalized in vocal_files:
+                if random.random() < 0.8:
+                    selected_tags.append("vocals")
+            else:
+                if random.random() < 0.5:
+                    selected_tags.append("instrumental")
+
+            texts.append(", ".join(selected_tags))
+
+        print(texts[0])
+        return {"text": texts}
+
+
+    dataset = dataset.map(
+        add_caption,
+        batched=True,
+        batch_size=512,
+        num_proc=50,
+        desc="Adding captions"
+    )
+
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
     column_names = dataset["train"].column_names
 
     # 6. Get the column names for input/target.
-    dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    # dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
+    dataset_columns = ["image", "text"]
+
     if args.image_column is None:
         image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
     else:
@@ -845,9 +982,14 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
-    )
+    if args.finetune_encoder:
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        )
+    else:
+        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, train_dataloader, lr_scheduler
+        )
 
     if args.use_ema:
         if args.offload_ema:
@@ -866,7 +1008,9 @@ def main():
         args.mixed_precision = accelerator.mixed_precision
 
     # Move text_encode and vae to gpu and cast to weight_dtype
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
+    if not args.finetune_encoder:
+        text_encoder.to(accelerator.device, dtype=weight_dtype)
+
     vae.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -1044,7 +1188,9 @@ def main():
                         ema_unet.to(device="cpu", non_blocking=True)
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
+                accelerator.log({
+                    "train_loss": train_loss,
+                    "learning_rate": lr_scheduler.get_last_lr()[0]}, step=global_step)
                 train_loss = 0.0
 
                 if global_step % args.checkpointing_steps == 0:
@@ -1103,6 +1249,10 @@ def main():
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = unwrap_model(unet)
+
+        if args.finetune_encoder:
+            text_encoder = unwrap_model(text_encoder)
+
         if args.use_ema:
             ema_unet.copy_to(unet.parameters())
 
@@ -1136,6 +1286,7 @@ def main():
                 with torch.autocast("cuda"):
                     image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
                 images.append(image)
+            image.save(os.path.join(args.output_dir, f"epoch{epoch}_image{i}.png"))
 
         if args.push_to_hub:
             save_model_card(args, repo_id, images, repo_folder=args.output_dir)
